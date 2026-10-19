@@ -1,5 +1,5 @@
  name: Daily Steam Deals Bot
-
+ jobs
 on:
   schedule:
     # Запуск каждый день в 05:00 UTC (08:00 МСК) и 11:00 UTC (14:00 МСК)
