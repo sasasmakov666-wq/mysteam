@@ -1,9 +1,9 @@
-name: Daily Steam Deals Bot
+ name: Daily Steam Deals Bot
 
 on:
   schedule:
-    # Запуск каждый день в 09:00 UTC (12:00 по Москве)
-    - cron: '0 9 * * *'
+    # Запуск каждый день в 05:00 UTC (08:00 МСК) и 11:00 UTC (14:00 МСК)
+    - cron: '0 5,11 * * *'
   
   # Кнопка для ручного запуска в интерфейсе GitHub
   workflow_dispatch:
