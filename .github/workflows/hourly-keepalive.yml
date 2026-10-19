@@ -1,8 +1,32 @@
-  - name: Print keepalive message
-    run: |
-      echo "Repository keepalive run at $(date --utc)"
+name: hourly-keepalive
 
-  - name: Optional: list top-level files
-    run: |
-      echo "Top-level files:"
-      ls -la
+on:
+  schedule:
+    - cron: '0 * * * *' # каждый час в минуту 0 (UTC)
+  workflow_dispatch: {}
+
+concurrency:
+  group: keepalive-${{ github.repository }}
+  cancel-in-progress: true
+
+jobs:
+  keep-repo-active:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Print keepalive message
+        run: |
+          echo "Repository keepalive run at $(date --utc)"
+
+      - name: Optional: list top-level files
+        run: |
+          echo "Top-level files:"
+          ls -la
+
+      # Пример: опциональный шаг ping (раскомментируйте и задайте секрет KEEPALIVE_URL)
+      #- name: Ping KEEPALIVE_URL
+      #  run: curl -fsS --max-time 30 "$KEEPALIVE_URL" || echo "Ping failed"
+      #  env:
+      #    KEEPALIVE_URL: ${{ secrets.KEEPALIVE_URL }}
