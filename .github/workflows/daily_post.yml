@@ -1,0 +1,44 @@
+name: Daily Steam Deals Bot
+
+on:
+  schedule:
+    # Запуск каждый день в 09:00 UTC (12:00 по Москве)
+    - cron: '0 9 * * *'
+  
+  # Кнопка для ручного запуска в интерфейсе GitHub
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish_deals:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Скачивание кода репозитория
+        uses: actions/checkout@v4
+
+      - name: Установка Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Установка библиотек
+        run: pip install -r requirements.txt
+
+      - name: Запуск бота и публикация поста
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+        run: python bot.py
+
+      - name: Сохранение списка опубликованных игр в репозиторий
+        run: |
+          if [ -f posted_games.json ]; then
+            git config --global user.name "github-actions[bot]"
+            git config --global user.email "github-actions[bot]@users.noreply.github.com"
+            git add posted_games.json
+            git diff --staged --quiet || git commit -m "Обновление базы опубликованных игр [skip ci]"
+            git push
+          fi
