@@ -1,0 +1,8 @@
+  - name: Print keepalive message
+    run: |
+      echo "Repository keepalive run at $(date --utc)"
+
+  - name: Optional: list top-level files
+    run: |
+      echo "Top-level files:"
+      ls -la
