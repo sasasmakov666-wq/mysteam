@@ -2,7 +2,8 @@ name: Daily Steam Deals Bot
 
 on:
   schedule:
-    - cron: '0 5,11 * * *'
+    # Запуск каждый час (в 05 минут каждого часа для обхода очередей GitHub)
+    - cron: '5 * * * *'
   workflow_dispatch:
 
 permissions:
