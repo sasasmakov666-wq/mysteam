@@ -1,209 +1,203 @@
 import os
-import re
-import sys
 import json
-import time
 import html
+import time
+from datetime import datetime, timezone
+
 import requests
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 
 HISTORY_FILE = "posted_games.json"
-MAX_HISTORY_SIZE = 2000  # Сколько последних игр помнить, чтобы не было повторов
+MAX_HISTORY_SIZE = 400       # Сколько последних ID помнить, чтобы не было повторов
 
-# --- Что отслеживаем ---
-ALLOW_DEALS = True  # Обычные скидки (от MIN_DISCOUNT %)
-MIN_DISCOUNT = 30  # Минимальная скидка в процентах
-SHOW_FREE_TO_PLAY = True  # Новые бесплатные игры (Free to Play)
-# Сортировка поиска Steam: "Released_DESC" — самые свежие, "Reviews_DESC" — самые популярные
-F2P_SORT = "Released_DESC"
+MAX_FREE = 5                 # Максимум бесплатных раздач в одном посте
+DEALS_PER_POST = 3           # Максимум скидок в одном посте
+MIN_DISCOUNT = 30            # Минимальная скидка в процентах
+MAX_CANDIDATES_TO_CHECK = 30 # Сколько игр проверять на карточки за один запуск (лимит запросов Steam)
+REQUEST_DELAY = 1.5          # Пауза между запросами к Steam Store, чтобы не получить ошибку 429
 
-# --- Лимиты за один запуск (защита от спама в канале) ---
-GIVEAWAYS_PER_RUN = 5
-F2P_PER_RUN = 3
-DEALS_PER_RUN = 5
-MAX_MESSAGES_PER_RUN = 10  # Остальное уйдёт при следующей проверке
-SEND_DELAY = 3  # Пауза между сообщениями, секунд (лимит Telegram для каналов)
+CARD_CATEGORY_ID = 29        # Категория "Steam Trading Cards" в appdetails
 
-# --- Режим постоянной работы (python bot.py --loop), например на сервере ---
-CHECK_INTERVAL = 120  # Как часто проверять Steam, секунд
+# True  — публиковать и раздачи, и скидки каждый час
+# False — раздачи каждый час, скидки только в 08:00 и 14:00 МСК (05:00 и 11:00 UTC)
+DISCOUNTS_EVERY_HOUR = True
 
 
 def load_posted_games():
-    """Загружает список уже опубликованных игр из файла."""
+    """Загружает список уже обработанных игр из файла."""
     if os.path.exists(HISTORY_FILE):
         try:
             with open(HISTORY_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if isinstance(data, list):
-                    return data
+            if isinstance(data, list):
+                return data
         except Exception as e:
             print(f"Ошибка чтения {HISTORY_FILE}: {e}")
     return []
 
 
 def save_posted_games(posted_ids):
-    """Сохраняет обновлённый список ID игр в файл."""
+    """Сохраняет список ID в файл, обрезая старые записи."""
     trimmed_ids = posted_ids[-MAX_HISTORY_SIZE:]
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(trimmed_ids, f, ensure_ascii=False, indent=2)
 
 
-def get_free_giveaways(posted):
-    """Новые 100% раздачи игр в Steam через GamerPower API. Возвращает [(id, текст)]."""
-    result = []
-    try:
-        url = "https://www.gamerpower.com/api/giveaways?platform=steam&type=game"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            for item in response.json():
-                giveaway_id = f"gp_{item.get('id')}"
-                if giveaway_id in posted:
-                    continue
-
-                title = html.escape(item.get("title", "Игра в Steam"))
-                link = item.get("open_giveaway_url", "")
-                worth = item.get("worth", "")
-                worth_text = f" (обычно {worth})" if worth and worth != "N/A" else ""
-
-                text = (
-                    "🚨 <b>Бесплатная раздача в Steam!</b>\n"
-                    f"🎁 <a href='{link}'><b>{title}</b></a> — Бесплатно{worth_text}"
-                )
-                result.append((giveaway_id, text))
-                if len(result) >= GIVEAWAYS_PER_RUN:
-                    break
-    except Exception as e:
-        print(f"Ошибка при проверке раздач: {e}")
-    return result
-
-
-def get_new_free_to_play(posted):
-    """Недавно вышедшие бесплатные игры (Free to Play) через поиск Steam."""
-    result = []
-    try:
-        url = "https://store.steampowered.com/search/results/"
-        params = {
-            "query": "",
-            "start": 0,
-            "count": 50,
-            "maxprice": "free",  # только бесплатные
-            "category1": 998,  # только игры (без DLC, софта и т.п.)
-            "sort_by": F2P_SORT,
-            "infinite": 1,
-            "cc": "ru",
-            "l": "russian",
-        }
-        response = requests.get(
-            url, params=params, timeout=15, headers={"User-Agent": "Mozilla/5.0"}
-        )
-        response.raise_for_status()
-        results_html = response.json().get("results_html", "")
-
-        rows = re.findall(r'data-ds-appid="(\d+)"[^>]*>(.*?)</a>', results_html, re.DOTALL)
-        for app_id, row_html in rows:
-            steam_id = f"steam_{app_id}"
-            if steam_id in posted:
-                continue
-
-            title_match = re.search(r'<span class="title">(.*?)</span>', row_html, re.DOTALL)
-            if not title_match:
-                continue
-            name = html.escape(html.unescape(title_match.group(1)).strip())
-            if not name:
-                continue
-
-            link = f"https://store.steampowered.com/app/{app_id}/"
-            text = (
-                "🆕 <b>Новая бесплатная игра в Steam!</b>\n"
-                f"<a href='{link}'><b>{name}</b></a> — Free to Play"
-            )
-            result.append((steam_id, text))
-            if len(result) >= F2P_PER_RUN:
-                break
-    except Exception as e:
-        print(f"Ошибка при поиске новых бесплатных игр: {e}")
-    return result
-
-
-def get_steam_discounts(posted, include_regular_deals=True):
-    """Раздачи (100%) и скидки с витрины Steam. Возвращает (раздачи, скидки) как [(id, текст)]."""
-    free_from_steam = []
-    deals = []
+def fetch_steam_candidates(posted_ids):
+    """Собирает кандидатов из витрины Steam, исключая уже обработанные игры."""
+    candidates = []
+    seen = set()
 
     try:
         url = "https://store.steampowered.com/api/featuredcategories?cc=ru&l=russian"
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
-
-        items = []
-        for category in ["specials", "top_sellers", "new_releases"]:
-            items.extend(data.get(category, {}).get("items", []))
-
-        for key, value in data.items():
-            if key not in ["specials", "top_sellers", "new_releases"] and isinstance(value, dict):
-                if "items" in value and isinstance(value["items"], list):
-                    items.extend(value["items"])
-
-        seen_here = set()
-        for item in items:
-            app_id = item.get("id")
-            if not app_id:
-                continue
-
-            steam_id = f"steam_{app_id}"
-            if steam_id in posted or steam_id in seen_here:
-                continue
-
-            name = html.escape(item.get("name", "Неизвестная игра"))
-            discount = item.get("discount_percent", 0)
-            final_price = item.get("final_price", 0) / 100
-            original_price = item.get("original_price", 0) / 100
-
-            if original_price <= 0:
-                continue
-
-            link = f"https://store.steampowered.com/app/{app_id}/"
-
-            if discount == 100 or final_price == 0:
-                text = (
-                    "🚨 <b>Бесплатная раздача в Steam!</b>\n"
-                    f"🎁 <a href='{link}'><b>{name}</b></a> — Бесплатно (вместо {original_price:.0f} ₽)"
-                )
-                free_from_steam.append((steam_id, text))
-                seen_here.add(steam_id)
-            elif include_regular_deals and discount >= MIN_DISCOUNT and len(deals) < DEALS_PER_RUN:
-                text = (
-                    "🔥 <b>Новая скидка в Steam!</b>\n"
-                    f"<a href='{link}'><b>{name}</b></a>\n"
-                    f"Скидка: <b>-{discount}%</b> | Цена: <s>{original_price:.0f} ₽</s> <b>{final_price:.0f} ₽</b>"
-                )
-                deals.append((steam_id, text))
-                seen_here.add(steam_id)
-
     except Exception as e:
-        print(f"Ошибка при получении скидок Steam: {e}")
-
-    return free_from_steam, deals
-
-
-def collect_new_items(posted_ids):
-    """Собирает все новые события в порядке важности: раздачи, новые F2P, скидки."""
-    posted = set(posted_ids)
-    giveaways = get_free_giveaways(posted)
-    free_steam, deals = get_steam_discounts(posted, include_regular_deals=ALLOW_DEALS)
-    f2p = get_new_free_to_play(posted) if SHOW_FREE_TO_PLAY else []
+        print(f"Ошибка при получении витрины Steam: {e}")
+        return candidates
 
     items = []
-    seen = set()
-    for item_id, text in free_steam + giveaways + f2p + deals:
-        if item_id in seen:
+    for value in data.values():
+        if isinstance(value, dict) and isinstance(value.get("items"), list):
+            items.extend(value["items"])
+
+    for item in items:
+        app_id = item.get("id")
+        if not app_id:
             continue
-        seen.add(item_id)
-        items.append((item_id, text))
-    return items
+
+        steam_id = f"steam_{app_id}"
+        if steam_id in posted_ids or steam_id in seen:
+            continue
+        seen.add(steam_id)
+
+        original = item.get("original_price", 0) / 100
+        final = item.get("final_price", 0) / 100
+        discount = item.get("discount_percent", 0)
+
+        if original <= 0:
+            continue
+
+        candidates.append({
+            "app_id": app_id,
+            "steam_id": steam_id,
+            "name": item.get("name", "Неизвестная игра"),
+            "discount": discount,
+            "final": final,
+            "original": original,
+            "free": discount == 100 or final == 0,
+        })
+
+    # Сначала бесплатные, потом по величине скидки
+    candidates.sort(key=lambda c: (not c["free"], -c["discount"]))
+    return candidates
+
+
+def get_app_details(app_id):
+    """Получает подробные данные об игре из Steam Store. Возвращает None при ошибке."""
+    url = "https://store.steampowered.com/api/appdetails"
+    params = {"appids": app_id, "cc": "ru", "l": "russian"}
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code != 200:
+            print(f"appdetails для {app_id}: статус {response.status_code}")
+            return None
+        payload = response.json().get(str(app_id), {})
+        if not payload.get("success"):
+            return None
+        return payload.get("data")
+    except Exception as e:
+        print(f"Ошибка appdetails для {app_id}: {e}")
+        return None
+
+
+def has_trading_cards(details):
+    """Проверяет, есть ли у игры торговые карточки Steam."""
+    return any(c.get("id") == CARD_CATEGORY_ID for c in details.get("categories", []))
+
+
+def get_card_games(posted_ids, include_regular_deals):
+    """
+    Возвращает (бесплатные игры с карточками, скидки на игры с карточками, проверенные ID).
+    Проверенные ID сохраняются, чтобы не проверять одну и ту же игру каждый час.
+    """
+    free_games = []
+    deals = []
+    checked_ids = []
+    checked_count = 0
+
+    for cand in fetch_steam_candidates(posted_ids):
+        if len(free_games) >= MAX_FREE and len(deals) >= DEALS_PER_POST:
+            break
+        if checked_count >= MAX_CANDIDATES_TO_CHECK:
+            break
+
+        wanted_free = cand["free"] and len(free_games) < MAX_FREE
+        wanted_deal = (
+            not cand["free"]
+            and include_regular_deals
+            and cand["discount"] >= MIN_DISCOUNT
+            and len(deals) < DEALS_PER_POST
+        )
+        if not (wanted_free or wanted_deal):
+            continue
+
+        details = get_app_details(cand["app_id"])
+        time.sleep(REQUEST_DELAY)
+        checked_count += 1
+
+        if details is None:
+            continue  # ошибка запроса: не помечаем как проверенную, попробуем в следующий раз
+
+        checked_ids.append(cand["steam_id"])
+
+        if not has_trading_cards(details):
+            continue
+
+        game = {
+            "name": html.escape(cand["name"]),
+            "link": html.escape(f"https://store.steampowered.com/app/{cand['app_id']}/", quote=True),
+            "discount": cand["discount"],
+            "final": cand["final"],
+            "original": cand["original"],
+        }
+        if cand["free"]:
+            free_games.append(game)
+        else:
+            deals.append(game)
+
+    return free_games, deals, checked_ids
+
+
+def format_post(free_games, deals):
+    """Формирует HTML-пост для Telegram."""
+    lines = []
+
+    if free_games:
+        lines.append("🚨 <b>Бесплатная раздача игры с карточками Steam!</b>\n")
+        lines.append("🆓 <b>Забрать бесплатно (для значка коллекционера):</b>")
+        for g in free_games:
+            lines.append(
+                f"🃏 <a href='{g['link']}'><b>{g['name']}</b></a> — "
+                f"Бесплатно (вместо {g['original']:.0f} ₽)"
+            )
+        lines.append("")
+    else:
+        lines.append("🃏 <b>Скидки на игры с карточками Steam!</b>\n")
+
+    if deals:
+        lines.append(f"📉 <b>Скидки от {MIN_DISCOUNT}% (для значка коллекционера):</b>")
+        for g in deals:
+            lines.append(
+                f"🔥 <a href='{g['link']}'><b>{g['name']}</b></a>\n"
+                f"Скидка: <b>-{g['discount']}%</b> | "
+                f"Цена: <s>{g['original']:.0f} ₽</s> <b>{g['final']:.0f} ₽</b>"
+            )
+
+    return "\n".join(lines)
 
 
 def send_to_telegram(text):
@@ -222,60 +216,28 @@ def send_to_telegram(text):
         "chat_id": clean_channel_id,
         "text": text,
         "parse_mode": "HTML",
-        "disable_web_page_preview": True,
+        "link_preview_options": {"is_disabled": True},
     }
-
-    for attempt in range(2):
-        response = requests.post(url, json=payload, timeout=10)
-        if response.status_code == 429 and attempt == 0:
-            # Telegram просит подождать — ждём и пробуем ещё раз
-            try:
-                wait = int(response.json().get("parameters", {}).get("retry_after", 5))
-            except Exception:
-                wait = 5
-            print(f"Telegram просит подождать {wait} с...")
-            time.sleep(wait + 1)
-            continue
-        if not response.ok:
-            print(f"Ошибка Telegram API (chat_id={clean_channel_id}): {response.text}")
+    response = requests.post(url, json=payload, timeout=10)
+    if not response.ok:
+        print(f"Ошибка Telegram API (chat_id={clean_channel_id}): {response.text}")
         response.raise_for_status()
-        return
-
-
-def run_once():
-    """Одна проверка: каждое новое событие уходит в канал отдельным сообщением сразу."""
-    posted_ids = load_posted_games()
-    items = collect_new_items(posted_ids)
-
-    if not items:
-        print("Новых раздач, скидок и бесплатных игр не появилось.")
-        return 0
-
-    sent = 0
-    for item_id, text in items[:MAX_MESSAGES_PER_RUN]:
-        try:
-            send_to_telegram(text)
-        except Exception as e:
-            print(f"Не удалось отправить сообщение: {e}")
-            break
-        # Запоминаем сразу после отправки, чтобы при сбое не было повторов
-        posted_ids.append(item_id)
-        save_posted_games(posted_ids)
-        sent += 1
-        time.sleep(SEND_DELAY)
-
-    print(f"Отправлено сообщений: {sent}. Ждёт следующей проверки: {max(len(items) - sent, 0)}.")
-    return sent
+    print("Пост успешно опубликован в Telegram!")
 
 
 if __name__ == "__main__":
-    if "--loop" in sys.argv:
-        print(f"Режим постоянной работы: проверка каждые {CHECK_INTERVAL} с.")
-        while True:
-            try:
-                run_once()
-            except Exception as e:
-                print(f"Ошибка в цикле: {e}")
-            time.sleep(CHECK_INTERVAL)
+    posted_ids = load_posted_games()
+    current_hour_utc = datetime.now(timezone.utc).hour
+    should_post_deals = DISCOUNTS_EVERY_HOUR or current_hour_utc in (5, 11)
+
+    free_games, deals, checked_ids = get_card_games(posted_ids, should_post_deals)
+
+    if not free_games and not deals:
+        print("Игр с карточками за этот запуск не найдено. Пост пропущен.")
     else:
-        run_once()
+        send_to_telegram(format_post(free_games, deals))
+
+    # Сохраняем только после успешной отправки (или если постить было нечего)
+    posted_ids.extend(checked_ids)
+    save_posted_games(posted_ids)
+    print(f"База обновлена! Добавлено ID: {len(checked_ids)}.")
